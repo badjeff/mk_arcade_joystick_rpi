@@ -63,6 +63,11 @@ MODULE_LICENSE("GPL");
 
 #define BSC1_BASE		(PERI_BASE + 0x804000)
 
+/*
+ * ADS1115 Defines
+ */
+#define NANO_SECOND_MULTIPLIER  1000000  // 1 millisecond = 1,000,000 Nanoseconds
+#define ADS1115_CONVERSIONDELAY (2 * NANO_SECOND_MULTIPLIER)
 
 /*
  * MCP23017 Defines
@@ -148,6 +153,7 @@ struct mk_pad {
     enum mk_type type;
     char phys[32];
     int mcp23017addr;
+    int ads1115addr;
     int gpio_maps[12]
 };
 
@@ -321,6 +327,59 @@ static void mk_gpio_read_packet(struct mk_pad * pad, unsigned char *data) {
 
 }
 
+static int16_t mk_ads1115_read_channel(char dev_addr, unsigned short channel) {
+  uint8_t writeBuf[2];
+  // config register for 4.096v; 860SPS
+  writeBuf[0] = 0b11000011; // 0xC3 single shot off
+  switch (channel) {
+    case (0): writeBuf[0] |= 0b01000000; break;
+    case (1): writeBuf[0] |= 0b01010000; break;
+    case (2): writeBuf[0] |= 0b01100000; break;
+    case (3): writeBuf[0] |= 0b01110000; break;
+  }
+  writeBuf[1] = 0b11100101; // bits 7-0  0x85
+  i2c_write(dev_addr, 1, writeBuf, 2);
+  mdelay(2);// conversion delay (2ms);
+
+  // set config register to 0
+  i2c_write(dev_addr, 0, NULL, 0);
+
+  // read conversion register (2 bytes)
+  unsigned short len = 2;
+  char readBuf[2];
+  memset(readBuf, 0, len); // clear the buffer
+  BSC1_DLEN = len;
+  BSC1_S = CLEAR_STATUS; // Reset status bits (see #define)
+  BSC1_C = START_READ; // Start Read after clearing FIFO (see #define)
+  unsigned short bufidx = 0;
+  do {
+      // Wait for some data to appear in the FIFO
+      while ((BSC1_S & BSC_S_TA) && !(BSC1_S & BSC_S_RXD));
+      // Consume the FIFO
+      while ((BSC1_S & BSC_S_RXD) && (bufidx < len)) {
+          readBuf[bufidx++] = BSC1_FIFO;
+      }
+  } while ((!(BSC1_S & BSC_S_DONE)));
+
+  // could also multiply by 256 then add readBuf[1]
+  int16_t val = readBuf[0] << 8 | readBuf[1];
+  // with +- LSB sometimes generates very low neg number.
+  if (val < 0) val = 0;
+  return val;
+}
+
+static void mk_ads1115_read_packet(struct mk_pad * pad, unsigned char *data) {
+  int16_t og = 18350;// my analog stick normal value @ ~18400, ~2.3 / 4.096 volt
+  int16_t dz = 800;// define a deadzone
+  int16_t ch0 = mk_ads1115_read_channel(pad->ads1115addr, 0);
+  // printk("ch0 = 0x%02x | %5d\n", ch0, ch0);
+  if      (ch0 < og - dz)    data[0] = 1; // up
+  else if (ch0 > og + dz)    data[1] = 1; // down
+  int16_t ch1 = mk_ads1115_read_channel(pad->ads1115addr, 1);
+  if      (ch1 < og - dz)    data[2] = 1; // left
+  else if (ch1 > og + dz)    data[3] = 1; // right
+}
+
 static void mk_input_report(struct mk_pad * pad, unsigned char * data) {
     struct input_dev * dev = pad->dev;
     int j;
@@ -342,10 +401,12 @@ static void mk_process_packet(struct mk *mk) {
         pad = &mk->pads[i];
         if (pad->type == MK_ARCADE_GPIO || pad->type == MK_ARCADE_GPIO_BPLUS || pad->type == MK_ARCADE_GPIO_TFT || pad->type == MK_ARCADE_GPIO_CUSTOM) {
             mk_gpio_read_packet(pad, data);
+            mk_ads1115_read_packet(pad, data);
             mk_input_report(pad, data);
         }
         if (pad->type == MK_ARCADE_MCP23017) {
             mk_mcp23017_read_packet(pad, data);
+            mk_ads1115_read_packet(pad, data);
             mk_input_report(pad, data);
         }
     }
@@ -426,6 +487,7 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
     pad->mcp23017addr = pad_type_arg;
     snprintf(pad->phys, sizeof (pad->phys),
             "input%d", idx);
+    pad->ads1115addr = 0x48;
 
     input_dev->name = mk_names[pad_type];
     input_dev->phys = pad->phys;
