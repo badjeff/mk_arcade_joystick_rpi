@@ -339,7 +339,7 @@ static int16_t mk_ads1115_read_channel(char dev_addr, unsigned short channel) {
   }
   writeBuf[1] = 0b11100101; // bits 7-0  0x85
   i2c_write(dev_addr, 1, writeBuf, 2);
-  mdelay(2);// conversion delay (2ms);
+  udelay(1000);// conversion delay;
 
   // set config register to 0
   i2c_write(dev_addr, 0, NULL, 0);
@@ -369,22 +369,24 @@ static int16_t mk_ads1115_read_channel(char dev_addr, unsigned short channel) {
 }
 
 static void mk_ads1115_read_packet(struct mk_pad * pad, unsigned char *data) {
+  struct input_dev * dev = pad->dev;
   int16_t og = 18350;// my analog stick normal value @ ~18400, ~2.3 / 4.096 volt
-  int16_t dz = 800;// define a deadzone
-  int16_t ch0 = mk_ads1115_read_channel(pad->ads1115addr, 0);
-  // printk("ch0 = 0x%02x | %5d\n", ch0, ch0);
-  if      (ch0 < og - dz)    data[0] = 1; // up
-  else if (ch0 > og + dz)    data[1] = 1; // down
-  int16_t ch1 = mk_ads1115_read_channel(pad->ads1115addr, 1);
-  if      (ch1 < og - dz)    data[2] = 1; // left
-  else if (ch1 > og + dz)    data[3] = 1; // right
+  int16_t dz = 1600;// define a deadzone
+  int16_t ch0 = -og + mk_ads1115_read_channel(pad->ads1115addr, 0);
+  int16_t ch1 = -og + mk_ads1115_read_channel(pad->ads1115addr, 1);
+  int16_t ch2 = -og + mk_ads1115_read_channel(pad->ads1115addr, 2);
+  int16_t ch3 = -og + mk_ads1115_read_channel(pad->ads1115addr, 3);
+  input_report_abs(dev, ABS_Y, (ch0 < -dz || ch0 > dz) ? ch0 : 0);
+  input_report_abs(dev, ABS_X, (ch1 < -dz || ch1 > dz) ? ch1 : 0);
+  input_report_abs(dev, ABS_RY, (ch2 < -dz || ch2 > dz) ? ch2 : 0);
+  input_report_abs(dev, ABS_RX, (ch3 < -dz || ch3 > dz) ? ch3 : 0);
 }
 
 static void mk_input_report(struct mk_pad * pad, unsigned char * data) {
     struct input_dev * dev = pad->dev;
     int j;
-    input_report_abs(dev, ABS_Y, !data[0]-!data[1]);
-    input_report_abs(dev, ABS_X, !data[2]-!data[3]);
+    input_report_abs(dev, ABS_HAT0Y, !data[0]-!data[1]);
+    input_report_abs(dev, ABS_HAT0X, !data[2]-!data[3]);
     for (j = 4; j < mk_max_arcade_buttons; j++) {
         input_report_key(dev, mk_arcade_gpio_btn[j - 4], data[j]);
     }
@@ -503,8 +505,17 @@ static int __init mk_setup_pad(struct mk *mk, int idx, int pad_type_arg) {
 
     input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 
+    // D-Pad
     for (i = 0; i < 2; i++)
-        input_set_abs_params(input_dev, ABS_X + i, -1, 1, 0, 0);
+        input_set_abs_params(input_dev, ABS_HAT0X + i, -1, 1, 0, 0);
+        
+    // Analog-Sticks
+    for (i = 0; i < 2; i++)
+        input_set_abs_params(input_dev, ABS_X + i, -16383, 16383, 16, 56);
+    for (i = 0; i < 2; i++)
+        input_set_abs_params(input_dev, ABS_RX + i, -16383, 16383, 16, 56);
+    
+    // Action-Pad
     for (i = 0; i < mk_max_arcade_buttons - 4; i++)
         __set_bit(mk_arcade_gpio_btn[i], input_dev->keybit);
 
